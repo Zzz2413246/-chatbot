@@ -1,0 +1,30 @@
+# 环境变量（含 API Key）
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 数据库
+*.db
+backend/data/
+
+# 日志
+*.log
+backend/logs/
+
+# Java（旧版）
+backend-java/
+
+# OS
+.DS_Store
+Thumbs.db
