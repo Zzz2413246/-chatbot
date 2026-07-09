@@ -43,6 +43,8 @@ class Settings(BaseSettings):
         "gpt-4o-mini": "openai",
         "gpt-4o": "openai",
         "gpt-3.5-turbo": "openai",
+        "qwen-vl-plus": "custom",
+        "qwen-plus": "custom",
     }
 
     # 可用模型列表（从 model_providers 的 key 自动生成，或手动指定）
@@ -55,11 +57,6 @@ class Settings(BaseSettings):
 
     # ==================== 数据库 ====================
     database_url: str = "sqlite+aiosqlite:///./chatbot.db"
-
-    # ==================== 微信开放平台 ====================
-    wechat_app_id: str = ""
-    wechat_app_secret: str = ""
-    wechat_redirect_uri: str = "http://localhost:8000/wechat/callback.html"
 
     # ==================== 日志 ====================
     log_level: str = "INFO"
@@ -78,11 +75,6 @@ class Settings(BaseSettings):
         if v <= 0:
             raise ValueError("max_tokens 必须大于 0")
         return v
-
-    @property
-    def is_wechat_configured(self) -> bool:
-        """微信是否已配置 AppID。"""
-        return bool(self.wechat_app_id and self.wechat_app_secret)
 
     def get_provider_config(self, model_name: str) -> dict:
         """根据模型名获取对应的 API 提供商配置（api_key + base_url）。"""

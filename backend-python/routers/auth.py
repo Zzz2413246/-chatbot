@@ -1,4 +1,4 @@
-"""认证 API：微信扫码登录、用户信息、登出。"""
+"""认证 API：用户名注册/登录、用户信息、登出。"""
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
@@ -17,24 +17,17 @@ settings = get_settings()
 logger = get_logger(__name__)
 
 
-class WechatLoginRequest(BaseModel):
-    """微信登录请求。"""
+class SimpleRegisterRequest(BaseModel):
+    """注册请求。"""
 
-    code: str = Field(..., min_length=1, description="微信登录凭证 code")
-
-
-class WechatCallbackRequest(BaseModel):
-    """微信开放平台回调请求。"""
-
-    code: str = Field(..., min_length=1, description="微信授权 code")
-    state: Optional[str] = Field(None, description="CSRF state 参数")
+    username: str = Field(..., min_length=2, max_length=32, description="用户名")
+    nickname: Optional[str] = Field(None, description="昵称")
 
 
-class WechatLoginResponse(BaseModel):
-    """微信登录响应。"""
+class SimpleLoginRequest(BaseModel):
+    """登录请求。"""
 
-    token: str
-    user: dict
+    username: str = Field(..., min_length=2, max_length=32, description="用户名")
 
 
 class UpdateUserRequest(BaseModel):
@@ -44,66 +37,35 @@ class UpdateUserRequest(BaseModel):
     avatar_url: Optional[str] = None
 
 
-# ==================== 微信登录状态 ====================
+# ==================== 注册/登录 ====================
 
 
-@router.get("/wechat/status")
-async def wechat_status() -> dict:
-    """检查微信开放平台登录是否可用。"""
-    return {"web_login_enabled": AuthService.is_web_login_enabled()}
-
-
-# ==================== 微信扫码登录 ====================
-
-
-@router.get("/wechat/qrurl")
-async def get_qr_url() -> dict:
-    """获取微信扫码登录的授权 URL。"""
-    if not AuthService.is_web_login_enabled():
-        raise HTTPException(
-            status_code=400,
-            detail="微信登录未配置（缺少 WECHAT_APP_ID / WECHAT_APP_SECRET）",
-        )
-    return AuthService.generate_qr_url()
-
-
-@router.post("/wechat/callback")
-async def wechat_callback(
-    req: WechatCallbackRequest,
+@router.post("/register")
+async def register(
+    req: SimpleRegisterRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """微信开放平台回调接口。前端 callback.html 将微信重定向传来的 code + state 发给此接口。"""
+    """用户名注册。"""
     auth_service = AuthService(db)
     try:
-        result = await auth_service.handle_callback(req.code, req.state)
+        result = await auth_service.simple_register(req.username, req.nickname)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.exception("auth.callback.error")
-        raise HTTPException(status_code=500, detail=f"登录失败: {e}")
-
     return {"token": result["token"], "user": result["user"]}
 
 
-# ==================== 通用微信登录 ====================
-
-
-@router.post("/wechat/login", response_model=WechatLoginResponse)
-async def wechat_login(
-    req: WechatLoginRequest,
+@router.post("/login")
+async def login(
+    req: SimpleLoginRequest,
     db: AsyncSession = Depends(get_db),
-) -> WechatLoginResponse:
-    """微信登录（兼容 code 登录和模拟模式）。"""
+) -> dict:
+    """用户名登录。"""
     auth_service = AuthService(db)
     try:
-        result = await auth_service.wechat_login(req.code)
+        result = await auth_service.simple_login(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.exception("auth.login.error")
-        raise HTTPException(status_code=500, detail=f"登录失败: {e}")
-
-    return WechatLoginResponse(token=result["token"], user=result["user"])
+    return {"token": result["token"], "user": result["user"]}
 
 
 # ==================== 用户信息 ====================
@@ -114,10 +76,7 @@ async def get_user_info(user: Optional[User] = Depends(get_current_user)) -> dic
     """获取用户信息。"""
     if not user:
         raise HTTPException(status_code=401, detail="未登录或登录已过期")
-    return {
-        "user": user.to_dict(),
-        "mock_mode": not settings.is_wechat_configured,
-    }
+    return {"user": user.to_dict()}
 
 
 @router.put("/user/info")
