@@ -95,7 +95,7 @@ MODEL_PRESETS: Dict[str, dict] = {
         # 视觉理解需使用 qwen-vl-plus / qwen-vl-max / qwen3.x-vl-plus 等多模态模�?
         "model_name": "qwen-vl-plus",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key": "",
+        "api_key": "",  # 请在 .env 中通过 QWEN_API_KEY 设置
         "description": "通义千问 VL Plus，阿里云视觉模型，支持图片识�?,
         "supports_image": True,
     },
