@@ -186,6 +186,12 @@ const app = createApp({
             const mathStore = [];
             const PLACEHOLDER_PREFIX = 'KATEXMATHPLACEHOLDER';
 
+            // 0) 统一 LaTeX 分隔符：\[ ... \] → $$ ... $$，\( ... \) → $ ... $
+            //    必须在 $$ / $ 提取之前完成，否则 marked 会吃掉 \[ \] \( \) 中的反斜杠
+            //    导致公式分隔符与矩阵换行 \\ 全部损坏
+            content = content.replace(/\\\[([\s\S]+?)\\\]/g, (_, formula) => `$$${formula}$$`);
+            content = content.replace(/\\\(([\s\S]+?)\\\)/g, (_, formula) => `$${formula}$`);
+
             // 1) 块级公式 $$...$$
             content = content.replace(/\$\$([\s\S]+?)\$\$/g, (m, formula) => {
                 const idx = mathStore.length;
@@ -627,7 +633,7 @@ const app = createApp({
                 state.messages = messages.map(m => ({
                     role: m.role,
                     content: m.content,
-                    image_url: m.image_data || null,
+                    image_url: m.image_url || null,
                     loading: false,
                     error: null,
                 }));

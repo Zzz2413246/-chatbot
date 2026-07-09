@@ -91,7 +91,7 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)  # user / assistant / system
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    image_url: Mapped[str] = mapped_column(String(2048), nullable=True)
+    image_url: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     session: Mapped["Session"] = relationship("Session", back_populates="messages")
