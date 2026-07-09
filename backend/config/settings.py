@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     wechat_web_redirect_uri: str = "http://localhost/wechat/callback"
 
     # 认证
-    token_secret: str = "chatbot-secret-key-2024"
+    token_secret: str = ""
     token_expire_hours: int = 72
 
 

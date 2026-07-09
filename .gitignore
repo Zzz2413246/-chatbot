@@ -1,6 +1,7 @@
 # 环境变量（含 API Key）
 .env
 backend/.env
+backend-python/.env
 
 # Python
 __pycache__/
