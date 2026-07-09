@@ -20,6 +20,56 @@ router = APIRouter(prefix="/api", tags=["chat"])
 settings = get_settings()
 logger = get_logger(__name__)
 
+# 支持视觉（多模态）的模型集合；其它模型收到图片时自动回退到 qwen-vl-plus
+_VISION_MODELS = {"qwen-vl-plus", "qwen-vl-max", "gpt-4o", "gpt-4o-mini"}
+_DEFAULT_VISION_MODEL = "qwen-vl-plus"
+
+
+def _normalize_image_data(image_data: Optional[str]) -> Optional[str]:
+    """把前端传来的图片数据统一规整为 data URL。
+
+    前端可能传：
+      - 完整 data URL：data:image/png;base64,xxxx
+      - 纯 base64 字符串
+    返回可直接塞进 OpenAI 多模态消息的 data URL；非法返回 None。
+    """
+    if not image_data:
+        return None
+    s = image_data.strip()
+    if s.startswith("data:"):
+        return s
+    # 纯 base64，按魔数推断 MIME
+    mime = _guess_mime_from_base64(s)
+    return f"data:{mime};base64,{s}"
+
+
+def _resolve_model_for_image(model_name: Optional[str], session_model_name: str) -> str:
+    """若消息含图片但当前模型不支持视觉，回退到默认视觉模型。"""
+    target = model_name or session_model_name or settings.model_name
+    if target not in _VISION_MODELS:
+        logger.warning("chat.image.model_fallback", from_model=target, to_model=_DEFAULT_VISION_MODEL)
+        return _DEFAULT_VISION_MODEL
+    return target
+
+
+def _guess_mime_from_base64(b64: str) -> str:
+    """根据 base64 头几个字节的魔数推断图片 MIME 类型。"""
+    try:
+        import base64
+
+        head = base64.b64decode(b64[:32] or "", validate=False)
+    except Exception:
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
 
 class ChatRequest(BaseModel):
     """聊天请求。"""
@@ -31,6 +81,9 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = Field(None, description="系统提示词")
     temperature: Optional[float] = Field(None, description="温度")
     max_tokens: Optional[int] = Field(None, description="最大token数")
+    image_data: Optional[str] = Field(
+        None, description="图片数据，可为纯 base64 或 data URL（data:image/xxx;base64,...）"
+    )
 
 
 class ChatResponse(BaseModel):
@@ -52,12 +105,17 @@ async def chat(
     session_service = SessionService(db)
 
     session = await _ensure_session(req, user, session_service)
-    model_name = req.model_name or session.model_name
+    # 图片消息：规整 data URL，必要时回退到视觉模型
+    image_url = _normalize_image_data(req.image_data)
+    if image_url:
+        model_name = _resolve_model_for_image(req.model_name, session.model_name)
+    else:
+        model_name = req.model_name or session.model_name
     # 解析 system_prompt：优先 req.system_prompt，其次 preset_id，最后 session.system_prompt
     system_prompt = _resolve_system_prompt(req.system_prompt, req.preset_id) or session.system_prompt
 
-    # 保存用户消息
-    await session_service.add_message(session.id, "user", req.message)
+    # 保存用户消息（带图片 data URL，_build_messages 才能把图片塞进上下文）
+    await session_service.add_message(session.id, "user", req.message, image_url=image_url)
 
     # 取历史消息构造上下文
     messages = await session_service.get_session_messages(session.id)
@@ -95,12 +153,17 @@ async def chat_stream(
     session_service = SessionService(db)
 
     session = await _ensure_session(req, user, session_service)
-    model_name = req.model_name or session.model_name
+    # 图片消息：规整 data URL，必要时回退到视觉模型
+    image_url = _normalize_image_data(req.image_data)
+    if image_url:
+        model_name = _resolve_model_for_image(req.model_name, session.model_name)
+    else:
+        model_name = req.model_name or session.model_name
     # 解析 system_prompt：优先 req.system_prompt，其次 preset_id，最后 session.system_prompt
     system_prompt = _resolve_system_prompt(req.system_prompt, req.preset_id) or session.system_prompt
 
-    # 保存用户消息（先提交，确保历史可见）
-    await session_service.add_message(session.id, "user", req.message)
+    # 保存用户消息（先提交，确保历史可见；带图片 data URL）
+    await session_service.add_message(session.id, "user", req.message, image_url=image_url)
 
     messages = await session_service.get_session_messages(session.id)
     history = [m.to_dict() for m in messages]
@@ -181,9 +244,22 @@ async def chat_image_json(
 ) -> dict:
     """图片识别（JSON 格式，适配前端 base64 上传）。"""
     import base64
+    import re
+
+    # 兼容前端两种传参：完整 data URL 或 纯 base64
+    raw = req.image_data.strip()
+    mime_type = "image/jpeg"
+    payload = raw
+    m = re.match(r"data:(image/[a-zA-Z0-9.+-]+);base64,(.+)", raw, re.DOTALL)
+    if m:
+        mime_type = m.group(1)
+        payload = m.group(2)
+    else:
+        # 非 data URL，认为是纯 base64
+        mime_type = _guess_mime_from_base64(payload)
 
     try:
-        image_bytes = base64.b64decode(req.image_data)
+        image_bytes = base64.b64decode(payload)
     except Exception:
         raise HTTPException(status_code=400, detail="无效的 base64 图片数据")
 
@@ -205,11 +281,12 @@ async def chat_image_json(
         user,
         session_service,
     )
-    target_model = req.model_name or session.model_name
+    # 非视觉模型自动回退到默认视觉模型
+    target_model = _resolve_model_for_image(req.model_name, session.model_name)
     system_prompt = _resolve_system_prompt(None, req.preset_id) or session.system_prompt
 
-    # 构建 data URL 用于消息回放
-    data_url = f"data:image/jpeg;base64,{req.image_data}"
+    # 构建 data URL 用于消息回放（统一使用检测到的 MIME）
+    data_url = f"data:{mime_type};base64,{payload}"
     await session_service.add_message(
         session.id, "user", req.message, image_url=data_url
     )
@@ -219,7 +296,7 @@ async def chat_image_json(
             image_bytes=image_bytes,
             prompt=req.message,
             model_name=target_model,
-            mime_type="image/jpeg",
+            mime_type=mime_type,
         )
     except Exception as e:
         logger.exception("chat.image.error", session_id=session.id)

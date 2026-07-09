@@ -202,8 +202,8 @@ class LLMService:
                 "image_url": data_url,
             }
         ]
-        # 图片识别建议使用 gpt-4o 系列，但允许调用方指定
-        target_model = model_name or "gpt-4o-mini"
+        # 默认使用已配置的 qwen-vl-plus（DashScope），避免无 OpenAI Key 时失败
+        target_model = model_name or "qwen-vl-plus"
         logger.info("llm.image.recognize", model=target_model, mime=mime_type, size=len(image_bytes))
         return await self.chat(messages=messages, model_name=target_model)
 

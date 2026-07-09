@@ -356,7 +356,8 @@ const app = createApp({
             try {
                 const response = await fetch(`${API_BASE_URL}/api/models`);
                 const data = await response.json();
-                const rawModels = data.models || [];
+                // 优先使用后端返回的 models_detail（含 supports_image 等元信息）
+                const rawModels = data.models_detail || data.models || [];
                 state.models = rawModels.map(m => (typeof m === 'string' ? m : m.model_name));
                 // 保存模型详细信息（包括是否支持图片）
                 state.modelInfo = {};
@@ -1018,8 +1019,8 @@ const app = createApp({
                     state.currentModel = imageModel;
                     showToast(`已自动切换到 ${formatModelName(imageModel)} 以支持图片识别`, 'info');
                 } else {
-                    showToast('当前没有可用的图片识别模型', 'error');
-                    return;
+                    // 本地未发现视觉模型，仍允许上传，后端会自动回退到 qwen-vl-plus
+                    showToast('当前模型不支持图片，后端将自动回退到视觉模型', 'info');
                 }
             }
 

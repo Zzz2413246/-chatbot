@@ -77,18 +77,22 @@ class Settings(BaseSettings):
         return v
 
     def get_provider_config(self, model_name: str) -> dict:
-        """根据模型名获取对应的 API 提供商配置（api_key + base_url）。"""
+        """根据模型名获取对应的 API 提供商配置（api_key + base_url）。
+
+        注意：api_key / base_url 旧字段仅作为 DeepSeek 的 fallback，
+        不混用到 openai / custom 提供商，避免用错 Key。
+        """
         provider = self.model_providers.get(model_name, "deepseek")
 
         if provider == "openai":
-            api_key = self.openai_api_key or self.api_key
+            api_key = self.openai_api_key
             base_url = self.openai_base_url
         elif provider == "custom":
-            api_key = self.custom_api_key or self.api_key
+            api_key = self.custom_api_key
             base_url = self.custom_base_url
         else:  # deepseek (默认)
             api_key = self.deepseek_api_key or self.api_key
-            base_url = self.deepseek_base_url
+            base_url = self.deepseek_base_url or self.base_url
 
         return {"api_key": api_key, "base_url": base_url}
 
