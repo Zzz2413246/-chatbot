@@ -4,10 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>科普助手 · 科科</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=5">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- KaTeX：数学公式渲染 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 </head>
 <body>
     <div id="app" class="app">
@@ -83,6 +86,13 @@
                         <div class="stat-label">总消息</div>
                     </div>
                 </div>
+                <div class="stats-token-row" v-if="state.totalTokenUsage.prompt || state.totalTokenUsage.completion">
+                    <div class="stats-token-label">🪙 累计 Token</div>
+                    <div class="stats-token-detail">
+                        <span class="token-tag token-prompt">输入 {{ formatTokenCount(state.totalTokenUsage.prompt) }}</span>
+                        <span class="token-tag token-completion">输出 {{ formatTokenCount(state.totalTokenUsage.completion) }}</span>
+                    </div>
+                </div>
             </div>
         </aside>
 
@@ -103,15 +113,53 @@
                     <!-- 模型选择 -->
                     <div class="select-wrapper">
                         <select v-model="state.currentModel" @change="switchModel" class="top-select model-select" title="选择模型">
-                            <option v-for="model in state.models" :key="model" :value="model">{{ formatModelName(model) }}</option>
+                            <option v-for="model in state.models" :key="model" :value="model">
+                                {{ formatModelName(model) }}{{ state.modelInfo[model] && state.modelInfo[model].supports_image ? ' 📷' : '' }}
+                            </option>
                         </select>
                     </div>
 
-                    <!-- 预设角色选择 -->
-                    <div class="select-wrapper">
-                        <select v-model="state.currentPresetId" @change="switchPreset" class="top-select preset-select" title="选择预设角色">
-                            <option v-for="preset in state.presets" :key="preset.id" :value="preset.id">{{ preset.icon }} {{ preset.name }}</option>
-                        </select>
+                    <!-- 深度思考 -->
+                    <button
+                        :class="['top-btn', 'deep-think-btn', { active: state.deepThink }]"
+                        @click="toggleDeepThink"
+                        title="深度思考模式（使用推理模型）"
+                    >
+                        🧠 <span class="btn-text">深度思考</span>
+                    </button>
+
+                    <!-- Agent 模式切换 -->
+                    <button
+                        :class="['top-btn', 'agent-mode-btn', { active: state.agentMode }]"
+                        @click="toggleAgentMode"
+                        title="Agent 模式（支持工具调用）"
+                    >
+                        🤖 <span class="btn-text">Agent</span>
+                    </button>
+
+                    <!-- 多模型对比 -->
+                    <button
+                        class="top-btn compare-btn"
+                        @click="openCompareModal"
+                        title="多模型并行对比"
+                    >
+                        ⚖️ <span class="btn-text">对比</span>
+                    </button>
+
+                    <!-- 预设角色选择 + 管理按钮 -->
+                    <div class="preset-wrapper">
+                        <div class="select-wrapper">
+                            <select v-model="state.currentPresetId" @change="switchPreset" class="top-select preset-select" title="选择预设角色">
+                                <option v-for="preset in state.presets" :key="preset.id" :value="preset.id">{{ preset.icon }} {{ preset.name }}</option>
+                            </select>
+                        </div>
+                        <button
+                            class="preset-manage-btn"
+                            @click="openPresetListModal"
+                            title="管理预设"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                        </button>
                     </div>
 
                     <!-- 导出按钮 -->
@@ -125,6 +173,12 @@
                             <button class="dropdown-item" @click="exportSession('txt')">📃 导出 TXT</button>
                         </div>
                     </div>
+
+                    <!-- 暗色模式切换 -->
+                    <button class="top-btn" @click="toggleDarkMode" :title="state.darkMode ? '切换到亮色模式' : '切换到暗色模式'">
+                        <svg v-if="state.darkMode" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                        <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                    </button>
 
                     <!-- 登录/用户按钮 -->
                     <button v-if="!state.currentUser" class="top-btn login-btn" @click="state.showLoginModal = true">
@@ -142,6 +196,7 @@
                                 <div class="user-menu-id">ID: {{ state.currentUser.id }}</div>
                             </div>
                             <button class="dropdown-item" @click="logout">🚪 退出登录</button>
+                            <button class="dropdown-item danger-item" @click="deleteAccount">🗑️ 删除账号</button>
                         </div>
                     </div>
                 </div>
@@ -161,21 +216,14 @@
                     <h2>你好！我是{{ state.currentPreset ? state.currentPreset.name : '科科' }}</h2>
                     <p class="welcome-desc">{{ state.currentPreset ? state.currentPreset.description : '你的专属科学知识向导' }}</p>
                     <div class="welcome-suggestions">
-                        <div class="suggestion-card" @click="sendSuggestion('请用通俗的语言解释一下量子纠缠是什么？')">
-                            <span class="suggestion-icon">🌌</span>
-                            <span>量子纠缠是什么？</span>
-                        </div>
-                        <div class="suggestion-card" @click="sendSuggestion('黑洞是如何形成的？')">
-                            <span class="suggestion-icon">🕳️</span>
-                            <span>黑洞是如何形成的？</span>
-                        </div>
-                        <div class="suggestion-card" @click="sendSuggestion('DNA双螺旋结构是如何被发现的？')">
-                            <span class="suggestion-icon">🧬</span>
-                            <span>DNA结构的发现</span>
-                        </div>
-                        <div class="suggestion-card" @click="sendSuggestion('为什么天空是蓝色的？')">
-                            <span class="suggestion-icon">🌍</span>
-                            <span>为什么天空是蓝色？</span>
+                        <div
+                            v-for="prompt in state.quickPrompts"
+                            :key="prompt.text"
+                            class="suggestion-card"
+                            @click="useQuickPrompt(prompt.text)"
+                        >
+                            <span class="suggestion-icon">{{ prompt.icon }}</span>
+                            <span>{{ prompt.text }}</span>
                         </div>
                     </div>
                 </div>
@@ -201,7 +249,42 @@
                             <span class="loading-dot"></span>
                             <span class="loading-dot"></span>
                         </div>
+                        <!-- Agent 工具调用记录 -->
+                        <div v-if="msg.toolCalls && msg.toolCalls.length" class="tool-calls-list">
+                            <div class="tool-calls-title">🛠️ 工具调用</div>
+                            <div v-for="(tc, ti) in msg.toolCalls" :key="ti" class="tool-call-item">
+                                <span class="tool-call-name">{{ tc.name || tc.tool || '工具' }}</span>
+                                <span v-if="tc.status" class="tool-call-status">{{ tc.status }}</span>
+                            </div>
+                        </div>
                         <div v-if="msg.error" class="message-error">⚠️ {{ msg.error }}</div>
+                        <!-- 助手消息操作栏 -->
+                        <div
+                            v-if="msg.role === 'assistant' && msg.content && !msg.loading && !msg.error"
+                            class="message-actions"
+                        >
+                            <button class="msg-action-btn" @click="copyMessage(msg.content)" title="复制">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            </button>
+                            <!-- 语音朗读按钮 -->
+                            <button
+                                class="msg-action-btn"
+                                :class="{ active: state.isSpeaking && state.speakingMessageIndex === index }"
+                                @click="toggleSpeech(msg.content, index)"
+                                :title="state.isSpeaking && state.speakingMessageIndex === index ? '停止朗读' : '朗读'"
+                            >
+                                <svg v-if="state.isSpeaking && state.speakingMessageIndex === index" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="5" width="4" height="14"></rect><rect x="14" y="5" width="4" height="14"></rect></svg>
+                                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                            </button>
+                            <button
+                                v-if="index === state.messages.length - 1 && !state.isSending"
+                                class="msg-action-btn"
+                                @click="regenerateAnswer"
+                                title="重新生成"
+                            >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -224,19 +307,36 @@
                     <button class="input-btn image-upload-btn" @click="selectImage" title="上传图片">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
                     </button>
+                    <!-- 语音输入按钮 -->
+                    <button
+                        :class="['input-btn', 'voice-input-btn', { listening: state.isListening }]"
+                        @click="toggleVoiceInput"
+                        :title="state.isListening ? '停止语音输入' : '语音输入'"
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                    </button>
                     <textarea
                         ref="inputTextarea"
                         v-model="state.inputMessage"
                         class="message-input"
-                        placeholder="输入你的问题..."
+                        :placeholder="state.isListening ? '正在聆听...' : (state.agentMode ? '输入问题，Agent 将调用工具回答...' : '输入你的问题...')"
                         rows="1"
                         @input="adjustTextareaHeight"
                         @keydown="handleKeyDown"
                     ></textarea>
                     <button
+                        v-if="state.isSending"
+                        class="input-btn stop-btn"
+                        @click="stopGeneration"
+                        title="停止生成"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                    </button>
+                    <button
+                        v-else
                         class="input-btn send-btn"
                         @click="sendMessage"
-                        :disabled="(!state.inputMessage.trim() && !state.pendingImage) || state.isSending"
+                        :disabled="(!state.inputMessage.trim() && !state.pendingImage)"
                     >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                     </button>
@@ -246,6 +346,14 @@
                     <span>按 Enter 发送 · Shift+Enter 换行</span>
                     <span class="hint-separator">·</span>
                     <span>📷 支持图片识别</span>
+                    <template v-if="state.lastTokenUsage">
+                        <span class="hint-separator">·</span>
+                        <span class="token-hint">本轮: {{ formatTokenCount(state.lastTokenUsage.prompt_tokens) }} → {{ formatTokenCount(state.lastTokenUsage.completion_tokens) }} tokens</span>
+                    </template>
+                    <template v-if="state.agentMode">
+                        <span class="hint-separator">·</span>
+                        <span class="agent-hint">🤖 Agent 模式</span>
+                    </template>
                 </div>
             </footer>
         </main>
@@ -256,48 +364,194 @@
                 <button class="modal-close" @click="state.showLoginModal = false">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
-                <div class="login-icon">💚</div>
-                <h3>微信登录</h3>
+                <div class="login-icon">👤</div>
+                <h3>{{ state.loginMode === 'register' ? '注册' : '登录' }}</h3>
                 <p class="login-desc">登录后可保存聊天记录、同步会话数据</p>
 
-                <!-- 微信扫码登录（已配置时显示） -->
-                <div v-if="state.wechatWebEnabled" class="login-form">
-                    <button class="login-submit-btn wechat-qr-btn" @click="startWechatQrLogin">
-                        <span class="wechat-qr-icon">📱</span>
-                        <span>微信扫码登录</span>
-                    </button>
-                    <div class="login-divider">
-                        <span>或使用 code 登录</span>
+                <div class="login-form">
+                    <!-- 模式切换 -->
+                    <div class="login-tabs">
+                        <button
+                            :class="['login-tab', { active: state.loginMode === 'login' }]"
+                            @click="switchLoginMode('login')"
+                        >登录</button>
+                        <button
+                            :class="['login-tab', { active: state.loginMode === 'register' }]"
+                            @click="switchLoginMode('register')"
+                        >注册</button>
                     </div>
-                    <input
-                        v-model="state.loginCode"
-                        type="text"
-                        class="login-input"
-                        placeholder="输入微信 code（小程序/测试模式）"
-                        @keyup.enter="login"
-                    >
-                    <button class="login-submit-btn" @click="login" :disabled="state.loginLoading">
-                        {{ state.loginLoading ? '登录中...' : 'Code 登录' }}
-                    </button>
-                </div>
 
-                <!-- 仅 code 登录（未配置扫码登录时） -->
-                <div v-else class="login-form">
                     <input
-                        v-model="state.loginCode"
+                        v-model="state.loginUsername"
                         type="text"
                         class="login-input"
-                        placeholder="输入微信登录 code"
-                        @keyup.enter="login"
+                        placeholder="输入昵称ID（2-32个字符）"
+                        maxlength="32"
+                        @keyup.enter="submitAuth"
                     >
-                    <button class="login-submit-btn" @click="login" :disabled="state.loginLoading">
-                        {{ state.loginLoading ? '登录中...' : '微信登录' }}
+                    <input
+                        v-if="state.loginMode === 'register'"
+                        v-model="state.loginNickname"
+                        type="text"
+                        class="login-input"
+                        placeholder="显示昵称（可选，默认同昵称ID）"
+                        maxlength="32"
+                        @keyup.enter="submitAuth"
+                    >
+                    <button class="login-submit-btn" @click="submitAuth" :disabled="state.loginLoading">
+                        {{ state.loginLoading ? '处理中...' : (state.loginMode === 'register' ? '注册' : '登录') }}
                     </button>
                 </div>
                 <p class="login-hint">
-                    <span v-if="state.wechatWebEnabled">💡 点击扫码登录将在新窗口打开微信授权页</span>
-                    <span v-else>💡 未配置微信AppID时使用模拟模式，可输入任意code</span>
+                    <span v-if="state.loginMode === 'register'">💡 昵称ID不可重复，设定后无法更改</span>
+                    <span v-else>💡 首次使用请先注册，输入昵称ID即可</span>
                 </p>
+            </div>
+        </div>
+
+        <!-- 预设管理弹窗 -->
+        <div v-if="state.showPresetModal" class="modal-overlay" @click.self="state.showPresetModal = false">
+            <div class="modal preset-modal">
+                <button class="modal-close" @click="state.showPresetModal = false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+                <h3>🤖 预设管理</h3>
+                <p class="modal-desc">管理内置和自定义预设角色</p>
+
+                <!-- 预设列表 -->
+                <div class="preset-list">
+                    <div v-for="preset in state.presets" :key="preset.id" class="preset-list-item">
+                        <div class="preset-list-icon">{{ preset.icon }}</div>
+                        <div class="preset-list-body">
+                            <div class="preset-list-name">
+                                {{ preset.name }}
+                                <span v-if="preset.is_builtin" class="preset-builtin-tag">内置</span>
+                            </div>
+                            <div class="preset-list-desc">{{ preset.description }}</div>
+                        </div>
+                        <div class="preset-list-actions">
+                            <button
+                                v-if="!preset.is_builtin"
+                                class="preset-edit-btn"
+                                @click="openPresetModal('edit', preset)"
+                                title="编辑"
+                            >✏️</button>
+                            <button
+                                v-if="!preset.is_builtin"
+                                class="preset-delete-btn"
+                                @click="deletePreset(preset)"
+                                title="删除"
+                            >🗑️</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 新建预设按钮 -->
+                <button class="preset-create-btn" @click="openPresetModal('create', null)">
+                    ➕ 新建预设
+                </button>
+            </div>
+        </div>
+
+        <!-- 预设编辑/新建表单弹窗 -->
+        <div v-if="state.showPresetFormModal" class="modal-overlay" @click.self="state.showPresetFormModal = false">
+            <div class="modal preset-form-modal">
+                <button class="modal-close" @click="state.showPresetFormModal = false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+                <h3>{{ state.presetModalMode === 'edit' ? '✏️ 编辑预设' : '➕ 新建预设' }}</h3>
+                <div class="preset-form">
+                    <div class="form-row">
+                        <label class="form-label">图标</label>
+                        <input v-model="state.presetForm.icon" type="text" class="form-input form-input-icon" placeholder="🤖" maxlength="4">
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label">名称</label>
+                        <input v-model="state.presetForm.name" type="text" class="form-input" placeholder="预设名称" maxlength="32">
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label">描述</label>
+                        <input v-model="state.presetForm.description" type="text" class="form-input" placeholder="一句话描述（可选）" maxlength="100">
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label">系统提示词</label>
+                        <textarea v-model="state.presetForm.system_prompt" class="form-textarea" placeholder="定义该预设的系统提示词..." rows="5"></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button class="form-cancel-btn" @click="state.showPresetFormModal = false">取消</button>
+                        <button class="form-submit-btn" @click="savePreset">
+                            {{ state.presetModalMode === 'edit' ? '保存' : '创建' }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 多模型对比弹窗 -->
+        <div v-if="state.showCompareModal" class="modal-overlay" @click.self="closeCompareModal">
+            <div class="modal compare-modal">
+                <button class="modal-close" @click="closeCompareModal">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+                <h3>⚖️ 多模型对比</h3>
+                <p class="modal-desc">选择 2-4 个模型，对比同一问题的回答</p>
+
+                <!-- 模型选择 -->
+                <div class="compare-models-grid">
+                    <button
+                        v-for="model in state.models"
+                        :key="model"
+                        :class="['compare-model-chip', { selected: state.compareModels.includes(model) }]"
+                        @click="toggleCompareModel(model)"
+                    >
+                        {{ formatModelName(model) }}
+                        <span v-if="state.compareModels.includes(model)" class="chip-check">✓</span>
+                    </button>
+                </div>
+
+                <!-- 问题输入 -->
+                <div class="compare-input-row">
+                    <textarea
+                        v-model="state.compareMessage"
+                        class="compare-input"
+                        placeholder="输入要对比的问题..."
+                        rows="2"
+                    ></textarea>
+                    <button
+                        class="compare-run-btn"
+                        @click="runCompare"
+                        :disabled="state.compareLoading || state.compareModels.length < 2 || !state.compareMessage.trim()"
+                    >
+                        {{ state.compareLoading ? '对比中...' : '开始对比' }}
+                    </button>
+                </div>
+
+                <!-- 对比结果 -->
+                <div v-if="state.compareLoading" class="compare-loading">
+                    <div class="loading-indicator">
+                        <span class="loading-dot"></span>
+                        <span class="loading-dot"></span>
+                        <span class="loading-dot"></span>
+                    </div>
+                    <p>正在并行调用 {{ state.compareModels.length }} 个模型...</p>
+                </div>
+
+                <div v-if="state.compareResults && state.compareResults.length" class="compare-results">
+                    <div
+                        v-for="(result, idx) in state.compareResults"
+                        :key="idx"
+                        class="compare-result-card"
+                    >
+                        <div class="compare-result-header">
+                            <span class="compare-model-name">{{ formatModelName(result.model_name) }}</span>
+                            <span v-if="result.usage" class="compare-result-usage">
+                                {{ formatTokenCount(result.usage.prompt_tokens) }} → {{ formatTokenCount(result.usage.completion_tokens) }}
+                            </span>
+                        </div>
+                        <div v-if="result.error" class="compare-result-error">⚠️ {{ result.error }}</div>
+                        <div v-else class="compare-result-content" v-html="renderMarkdown(result.content)"></div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -309,6 +563,6 @@
         </transition>
     </div>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=5"></script>
 </body>
 </html>

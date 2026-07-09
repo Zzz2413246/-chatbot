@@ -20,7 +20,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +35,8 @@ from services.llm_service import LLMService
 from services.session_service import SessionService
 from services.auth_service import AuthService
 from services.export_service import ExportService
+from services.preset_service import PresetService
+from services.tool_service import get_default_tools
 from prompts.presets import get_preset, get_preset_list, DEFAULT_PRESET_ID
 from utils.logger import logger, setup_logging
 
@@ -48,6 +50,9 @@ llm_service = LLMService()
 session_service = SessionService(llm_service=llm_service)
 auth_service = AuthService()
 export_service = ExportService()
+preset_service = PresetService()
+# 默认工具列表（供 Agent 使用）
+default_tools = get_default_tools()
 
 
 # ========== 后台任务 ==========
@@ -95,6 +100,7 @@ class ChatRequest(BaseModel):
     message: str
     model_name: Optional[str] = None
     preset_id: Optional[str] = None
+    image_data: Optional[str] = None  # base64 图片，流式对话也支持图片
 
 
 class ImageChatRequest(BaseModel):
@@ -121,15 +127,50 @@ class SwitchModelRequest(BaseModel):
     model_name: str
 
 
-class WechatLoginRequest(BaseModel):
-    code: str
-    nickname: Optional[str] = "微信用户"
+class RegisterRequest(BaseModel):
+    username: str
+    nickname: Optional[str] = None
     avatar_url: Optional[str] = None
 
 
-class WechatWebCallbackRequest(BaseModel):
-    code: str
-    state: str
+class LoginRequest(BaseModel):
+    username: str
+
+
+class DeleteUserRequest(BaseModel):
+    """删除用户请求（需二次确认）"""
+    confirm: bool = False
+
+
+class CreatePresetRequest(BaseModel):
+    """创建自定义预设请求"""
+    name: str
+    system_prompt: str
+    description: Optional[str] = ""
+    icon: Optional[str] = "🤖"
+
+
+class UpdatePresetRequest(BaseModel):
+    """更新自定义预设请求（所有字段可选）"""
+    name: Optional[str] = None
+    system_prompt: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+
+
+class CompareChatRequest(BaseModel):
+    """多模型对比对话请求"""
+    message: str
+    model_names: List[str]
+    preset_id: Optional[str] = None
+
+
+class AgentChatRequest(BaseModel):
+    """工具调用 Agent 对话请求"""
+    message: str
+    session_id: Optional[str] = None
+    model_name: Optional[str] = None
+    preset_id: Optional[str] = None
 
 
 # ========== 辅助函数 ==========
@@ -155,11 +196,52 @@ async def _ensure_session(
 
 
 def _get_system_prompt(preset_id: Optional[str]) -> Optional[str]:
-    """根据预设ID获取系统提示词"""
+    """根据内置预设ID获取系统提示词（同步，仅查内置预设）"""
     preset = get_preset(preset_id or DEFAULT_PRESET_ID)
     if preset:
         return preset.get("system_prompt")
     return None
+
+
+async def _get_system_prompt_async(db, preset_id: Optional[str]) -> Optional[str]:
+    """
+    根据预设ID获取系统提示词（异步，内置 + 自定义预设）
+    - 优先查内置预设
+    - 内置未命中则查数据库自定义预设
+    - 均未命中回退默认预设
+    """
+    if not preset_id:
+        return _get_system_prompt(DEFAULT_PRESET_ID)
+    # 内置预设
+    builtin = get_preset(preset_id)
+    if builtin:
+        return builtin.get("system_prompt")
+    # 自定义预设（查数据库）
+    prompt = await preset_service.get_system_prompt(db, preset_id)
+    if prompt:
+        return prompt
+    # 回退默认
+    return _get_system_prompt(DEFAULT_PRESET_ID)
+
+
+async def _get_user_id_from_request(request: Request) -> Optional[int]:
+    """从请求头 Authorization: Bearer {token} 中解析 user_id"""
+    authorization = request.headers.get("Authorization")
+    token = auth_service.extract_token(authorization)
+    if not token:
+        return None
+    payload = auth_service.verify_token(token)
+    if not payload:
+        return None
+    return payload.get("user_id")
+
+
+async def _require_auth(request: Request) -> int:
+    """要求认证，返回 user_id；未认证抛 401"""
+    user_id = await _get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未认证或 token 已过期")
+    return user_id
 
 
 # ========== 健康检查 ==========
@@ -189,24 +271,34 @@ async def chat(request: ChatRequest, db=Depends(get_db)):
 
     # 获取历史消息
     history = await session_service.get_messages(db, sid)
-    system_prompt = _get_system_prompt(session.get("preset_id"))
+    # 支持自定义预设（异步查询）
+    system_prompt = await _get_system_prompt_async(db, session.get("preset_id"))
 
     # 调用 LLM
     try:
-        response_text = await llm_service.chat(
+        result = await llm_service.chat(
             history=history,
             message=request.message,
             model_name=model,
             system_prompt=system_prompt,
+            image_data=request.image_data,
         )
     except Exception as e:
         logger.error(f"对话失败: {e}")
         raise HTTPException(status_code=500, detail=f"对话失败: {e}")
 
-    # 保存消息
+    # 适配新的 dict 返回值
+    response_text = result.get("content", "") if isinstance(result, dict) else str(result)
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+
+    # 保存消息（用户消息不记录 token，assistant 消息记录 token 用量）
     is_first = session.get("message_count", 0) == 0
-    await session_service.add_message(db, sid, "user", request.message)
-    await session_service.add_message(db, sid, "assistant", response_text)
+    await session_service.add_message(db, sid, "user", request.message, image_data=request.image_data)
+    await session_service.add_message(
+        db, sid, "assistant", response_text,
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+    )
 
     # 首条消息后台生成标题（不阻塞响应）
     if is_first:
@@ -219,13 +311,14 @@ async def chat(request: ChatRequest, db=Depends(get_db)):
         "session_id": sid,
         "response": response_text,
         "model": model,
+        "usage": usage,
     }
 
 
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     """流式对话（SSE）"""
-    logger.info(f"流式对话 | session_id={request.session_id}")
+    logger.info(f"流式对话 | session_id={request.session_id} | image_data_len={len(request.image_data) if request.image_data else 0} | model={request.model_name}")
 
     async def event_generator():
         # 流式响应中使用独立 db 会话
@@ -238,27 +331,49 @@ async def chat_stream(request: ChatRequest):
                 model = request.model_name or session.get("model_name") or settings.model_name
 
                 history = await session_service.get_messages(db, sid)
-                system_prompt = _get_system_prompt(session.get("preset_id"))
+                # 支持自定义预设（异步查询）
+                system_prompt = await _get_system_prompt_async(db, session.get("preset_id"))
                 is_first = session.get("message_count", 0) == 0
+
+                # 检查模型是否支持图片
+                if request.image_data:
+                    model_cfg = get_model_config(model)
+                    if model_cfg and not model_cfg.get("supports_image", False):
+                        err = {
+                            "type": "error",
+                            "content": f"模型 {model} 不支持图片识别，请切换到支持图片的模型（如 gpt-4o-mini）",
+                        }
+                        yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        await db.rollback()
+                        return
 
                 # 先发送会话信息
                 meta = {"type": "session", "session_id": sid, "model": model}
                 yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
 
-                # 保存用户消息
-                await session_service.add_message(db, sid, "user", request.message)
+                # 保存用户消息（含图片）
+                await session_service.add_message(
+                    db, sid, "user", request.message,
+                    image_data=request.image_data,
+                )
 
                 full_response = ""
+                usage = {"prompt_tokens": 0, "completion_tokens": 0}
                 try:
-                    async for chunk in llm_service.chat_stream(
+                    async for event_type, payload in llm_service.chat_stream(
                         history=history,
                         message=request.message,
                         model_name=model,
                         system_prompt=system_prompt,
+                        image_data=request.image_data,
                     ):
-                        full_response += chunk
-                        data = {"type": "chunk", "content": chunk}
-                        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                        if event_type == "chunk":
+                            full_response += payload
+                            data = {"type": "chunk", "content": payload}
+                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                        elif event_type == "usage":
+                            usage = payload
                 except Exception as e:
                     logger.error(f"流式对话异常: {e}")
                     err = {"type": "error", "content": str(e)}
@@ -266,8 +381,12 @@ async def chat_stream(request: ChatRequest):
                     await db.rollback()
                     return
 
-                # 保存助手回复
-                await session_service.add_message(db, sid, "assistant", full_response)
+                # 保存助手回复（含 token 用量）
+                await session_service.add_message(
+                    db, sid, "assistant", full_response,
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
+                )
 
                 # 首条消息后台生成标题（不阻塞 done 信号）
                 if is_first:
@@ -275,7 +394,12 @@ async def chat_stream(request: ChatRequest):
 
                 await db.commit()
 
-                done = {"type": "done", "session_id": sid, "length": len(full_response)}
+                done = {
+                    "type": "done",
+                    "session_id": sid,
+                    "length": len(full_response),
+                    "usage": usage,
+                }
                 yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception as e:
@@ -313,10 +437,11 @@ async def chat_image(request: ImageChatRequest, db=Depends(get_db)):
         logger.info(f"当前模型不支持图片，切换至 {model}")
 
     history = await session_service.get_messages(db, sid)
-    system_prompt = _get_system_prompt(session.get("preset_id"))
+    # 支持自定义预设（异步查询）
+    system_prompt = await _get_system_prompt_async(db, session.get("preset_id"))
 
     try:
-        response_text = await llm_service.chat(
+        result = await llm_service.chat(
             history=history,
             message=request.message,
             model_name=model,
@@ -327,9 +452,17 @@ async def chat_image(request: ImageChatRequest, db=Depends(get_db)):
         logger.error(f"图片对话失败: {e}")
         raise HTTPException(status_code=500, detail=f"图片对话失败: {e}")
 
+    # 适配新的 dict 返回值
+    response_text = result.get("content", "") if isinstance(result, dict) else str(result)
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+
     is_first = session.get("message_count", 0) == 0
     await session_service.add_message(db, sid, "user", request.message, request.image_data)
-    await session_service.add_message(db, sid, "assistant", response_text)
+    await session_service.add_message(
+        db, sid, "assistant", response_text,
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+    )
 
     if is_first:
         await session_service.auto_generate_title(db, sid, request.message)
@@ -338,6 +471,7 @@ async def chat_image(request: ImageChatRequest, db=Depends(get_db)):
         "session_id": sid,
         "response": response_text,
         "model": model,
+        "usage": usage,
     }
 
 
@@ -362,24 +496,33 @@ async def chat_websocket(websocket: WebSocket):
                     model = model_name or session.get("model_name") or settings.model_name
 
                     history = await session_service.get_messages(db, sid)
-                    system_prompt = _get_system_prompt(session.get("preset_id"))
+                    # 支持自定义预设（异步查询）
+                    system_prompt = await _get_system_prompt_async(db, session.get("preset_id"))
                     is_first = session.get("message_count", 0) == 0
 
                     await session_service.add_message(db, sid, "user", message)
 
                     full_response = ""
-                    async for chunk in llm_service.chat_stream(
+                    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+                    async for event_type, payload in llm_service.chat_stream(
                         history=history,
                         message=message,
                         model_name=model,
                         system_prompt=system_prompt,
                     ):
-                        full_response += chunk
-                        await websocket.send_text(json.dumps(
-                            {"type": "chunk", "content": chunk}, ensure_ascii=False
-                        ))
+                        if event_type == "chunk":
+                            full_response += payload
+                            await websocket.send_text(json.dumps(
+                                {"type": "chunk", "content": payload}, ensure_ascii=False
+                            ))
+                        elif event_type == "usage":
+                            usage = payload
 
-                    await session_service.add_message(db, sid, "assistant", full_response)
+                    await session_service.add_message(
+                        db, sid, "assistant", full_response,
+                        prompt_tokens=usage.get("prompt_tokens"),
+                        completion_tokens=usage.get("completion_tokens"),
+                    )
 
                     # 首条消息后台生成标题
                     if is_first:
@@ -388,7 +531,7 @@ async def chat_websocket(websocket: WebSocket):
                     await db.commit()
 
                     await websocket.send_text(json.dumps(
-                        {"type": "done", "session_id": sid}, ensure_ascii=False
+                        {"type": "done", "session_id": sid, "usage": usage}, ensure_ascii=False
                     ))
                 except Exception as e:
                     logger.error(f"WebSocket 处理异常: {e}")
@@ -489,71 +632,114 @@ async def switch_model(request: SwitchModelRequest, db=Depends(get_db)):
 # ========== 预设管理 ==========
 
 @app.get("/api/presets")
-async def list_presets():
-    """获取预设列表"""
-    return {"presets": get_preset_list(), "default": DEFAULT_PRESET_ID}
+async def list_presets(request: Request, db=Depends(get_db)):
+    """
+    获取预设列表（内置 + 当前用户的自定义预设，合并返回）
+    - 若携带 token，则返回该用户的自定义预设
+    - 未携带 token 仅返回内置预设
+    """
+    user_id = await _get_user_id_from_request(request)
+    presets = await preset_service.list_presets(db, user_id=user_id)
+    return {"presets": presets, "default": DEFAULT_PRESET_ID}
 
 
 @app.get("/api/presets/{preset_id}")
-async def get_preset_detail(preset_id: str):
-    """获取预设详情"""
-    preset = get_preset(preset_id)
+async def get_preset_detail(preset_id: str, request: Request, db=Depends(get_db)):
+    """获取预设详情（内置或自定义）"""
+    user_id = await _get_user_id_from_request(request)
+    preset = await preset_service.get_preset(db, preset_id, user_id=user_id)
     if not preset:
         raise HTTPException(status_code=404, detail="预设不存在")
     return {"preset": preset}
 
 
+@app.post("/api/presets")
+async def create_preset(request: CreatePresetRequest, http_request: Request, db=Depends(get_db)):
+    """创建自定义预设（需认证）"""
+    user_id = await _require_auth(http_request)
+    try:
+        preset = await preset_service.create_preset(
+            db,
+            user_id=user_id,
+            name=request.name,
+            system_prompt=request.system_prompt,
+            description=request.description,
+            icon=request.icon,
+        )
+        await db.commit()
+        return {"preset": preset}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"创建预设失败: {e}")
+        raise HTTPException(status_code=500, detail=f"创建预设失败: {e}")
+
+
+@app.put("/api/presets/{preset_id}")
+async def update_preset(preset_id: str, request: UpdatePresetRequest, http_request: Request, db=Depends(get_db)):
+    """编辑自定义预设（需认证，仅可编辑自己的）"""
+    user_id = await _require_auth(http_request)
+    try:
+        preset = await preset_service.update_preset(
+            db,
+            preset_id=preset_id,
+            user_id=user_id,
+            name=request.name,
+            description=request.description,
+            system_prompt=request.system_prompt,
+            icon=request.icon,
+        )
+        if not preset:
+            raise HTTPException(status_code=404, detail="预设不存在或无权修改")
+        await db.commit()
+        return {"preset": preset}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新预设失败: {e}")
+        raise HTTPException(status_code=500, detail=f"更新预设失败: {e}")
+
+
+@app.delete("/api/presets/{preset_id}")
+async def delete_preset(preset_id: str, http_request: Request, db=Depends(get_db)):
+    """删除自定义预设（需认证，仅可删除自己的）"""
+    user_id = await _require_auth(http_request)
+    success = await preset_service.delete_preset(db, preset_id=preset_id, user_id=user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="预设不存在或无权删除")
+    await db.commit()
+    return {"success": True, "message": "预设已删除", "preset_id": preset_id}
+
+
 # ========== 用户认证 ==========
 
-@app.get("/api/auth/wechat/status")
-async def wechat_login_status():
-    """获取微信登录配置状态"""
-    return {
-        "web_login_enabled": auth_service.web_login_enabled(),
-        "redirect_uri": settings.wechat_web_redirect_uri,
-        "miniapp_configured": bool(settings.wechat_appid and settings.wechat_secret),
-    }
-
-
-@app.get("/api/auth/wechat/qrurl")
-async def wechat_qr_login_url():
-    """获取微信扫码登录 URL"""
-    if not auth_service.web_login_enabled():
-        raise HTTPException(
-            status_code=400,
-            detail="未配置微信开放平台网站应用，请在 .env 中设置 WECHAT_WEB_APPID 和 WECHAT_WEB_SECRET",
-        )
-    state = uuid.uuid4().hex[:16]
-    url = auth_service.get_qr_login_url(state=state)
-    return {
-        "qr_url": url,
-        "state": state,
-        "redirect_uri": settings.wechat_web_redirect_uri,
-    }
-
-
-@app.post("/api/auth/wechat/callback")
-async def wechat_web_callback(request: WechatWebCallbackRequest, db=Depends(get_db)):
-    """微信扫码登录回调（前端拿到 code+state 后调用）"""
+@app.post("/api/auth/register")
+async def register(request: RegisterRequest, db=Depends(get_db)):
+    """注册：设定昵称ID（不可重复）"""
     try:
-        result = await auth_service.web_login_callback(
-            db, code=request.code, state=request.state
+        result = await auth_service.register(
+            db,
+            username=request.username,
+            nickname=request.nickname,
+            avatar_url=request.avatar_url,
         )
+        await db.commit()
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"微信扫码登录失败: {e}")
-        raise HTTPException(status_code=500, detail=f"微信扫码登录失败: {e}")
+        logger.error(f"注册失败: {e}")
+        raise HTTPException(status_code=500, detail=f"注册失败: {e}")
 
 
-@app.post("/api/auth/wechat/login")
-async def wechat_login(request: WechatLoginRequest, db=Depends(get_db)):
-    """微信小程序登录（或模拟模式）"""
+@app.post("/api/auth/login")
+async def login(request: LoginRequest, db=Depends(get_db)):
+    """登录：用昵称ID登录（无需密码）"""
     try:
-        result = await auth_service.wechat_login(
-            db, code=request.code, nickname=request.nickname, avatar_url=request.avatar_url
-        )
+        result = await auth_service.login(db, username=request.username)
+        await db.commit()
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -595,6 +781,127 @@ async def logout(request: Request):
         raise HTTPException(status_code=400, detail="缺少 token")
     success = auth_service.logout(token)
     return {"success": success, "message": "已登出" if success else "token 不存在"}
+
+
+@app.delete("/api/auth/user")
+async def delete_user(request: DeleteUserRequest, http_request: Request, db=Depends(get_db)):
+    """
+    删除用户及其所有关联数据（需 token 认证 + 二次确认）
+    - 请求体需传 confirm: true
+    - 删除顺序：消息 -> 会话 -> 用户
+    """
+    user_id = await _require_auth(http_request)
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="请确认删除操作（请求体需传 confirm: true）")
+    try:
+        success = await auth_service.delete_user(db, user_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        await db.commit()
+        logger.info(f"用户已删除 | user_id={user_id}")
+        return {"success": True, "message": "用户及关联数据已删除", "user_id": user_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除用户失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除用户失败: {e}")
+
+
+# ========== 多模型对比 & 工具调用 Agent ==========
+
+@app.post("/api/chat/compare")
+async def chat_compare(request: CompareChatRequest, http_request: Request, db=Depends(get_db)):
+    """
+    多模型并行对比对话
+    - 接收 {message, model_names: List[str], preset_id}
+    - 返回各模型的回答对比 [{model_name, content, error, usage}]
+    """
+    if not request.model_names:
+        raise HTTPException(status_code=400, detail="model_names 不能为空")
+    # 校验模型是否可用
+    for name in request.model_names:
+        if get_model_config(name) is None:
+            raise HTTPException(status_code=400, detail=f"不支持的模型: {name}")
+
+    # 获取系统提示词（支持自定义预设）
+    system_prompt = await _get_system_prompt_async(db, request.preset_id)
+
+    try:
+        results = await llm_service.compare_models(
+            message=request.message,
+            model_names=request.model_names,
+            system_prompt=system_prompt,
+        )
+    except Exception as e:
+        logger.error(f"多模型对比失败: {e}")
+        raise HTTPException(status_code=500, detail=f"多模型对比失败: {e}")
+
+    return {
+        "message": request.message,
+        "results": results,
+    }
+
+
+@app.post("/api/chat/agent")
+async def chat_agent(request: AgentChatRequest, http_request: Request, db=Depends(get_db)):
+    """
+    工具调用 Agent 对话（非流式）
+    - 接收 {message, session_id, model_name, preset_id}
+    - 使用默认工具列表（calculator / get_current_time / web_search）
+    """
+    start = time.time()
+    logger.info(f"Agent 对话 | session_id={request.session_id}")
+
+    # 获取或创建会话
+    session = await _ensure_session(
+        db, request.session_id, request.model_name, request.preset_id
+    )
+    sid = session["session_id"]
+    model = request.model_name or session.get("model_name") or settings.model_name
+
+    # 获取历史消息与系统提示词（支持自定义预设）
+    history = await session_service.get_messages(db, sid)
+    system_prompt = await _get_system_prompt_async(db, session.get("preset_id"))
+
+    try:
+        result = await llm_service.chat_with_tools(
+            history=history,
+            message=request.message,
+            model_name=model,
+            system_prompt=system_prompt,
+            tools=default_tools,
+        )
+    except Exception as e:
+        logger.error(f"Agent 对话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent 对话失败: {e}")
+
+    response_text = result.get("content", "")
+    usage = result.get("usage", {})
+    tool_calls = result.get("tool_calls", [])
+
+    # 保存消息（含 token 用量）
+    is_first = session.get("message_count", 0) == 0
+    await session_service.add_message(db, sid, "user", request.message)
+    await session_service.add_message(
+        db, sid, "assistant", response_text,
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+    )
+
+    # 首条消息后台生成标题
+    if is_first:
+        asyncio.create_task(_background_generate_title(sid, request.message))
+
+    duration = (time.time() - start) * 1000
+    logger.info(f"Agent 对话完成 | session_id={sid} | 耗时={duration:.0f}ms | tools={len(tool_calls)}")
+
+    return {
+        "session_id": sid,
+        "response": response_text,
+        "model": model,
+        "usage": usage,
+        "tool_calls": tool_calls,
+    }
 
 
 # ========== 导出 ==========

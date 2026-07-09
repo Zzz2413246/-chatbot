@@ -47,13 +47,41 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+async def _run_lightweight_migrations(conn) -> None:
+    """
+    轻量级数据库迁移：为已存在的表补充新增列（兼容旧数据库）
+    - SQLite 不支持 IF NOT EXISTS 用于 ADD COLUMN，需先检查列是否存在
+    """
+    from sqlalchemy import text, inspect
+
+    def _get_columns(sync_conn, table_name: str) -> set:
+        insp = inspect(sync_conn)
+        return {col["name"] for col in insp.get_columns(table_name)}
+
+    # messages 表新增列
+    messages_cols = await conn.run_sync(lambda c: _get_columns(c, "messages"))
+    if "prompt_tokens" not in messages_cols:
+        await conn.execute(text("ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER"))
+    if "completion_tokens" not in messages_cols:
+        await conn.execute(text("ALTER TABLE messages ADD COLUMN completion_tokens INTEGER"))
+
+    # sessions 表新增列
+    sessions_cols = await conn.run_sync(lambda c: _get_columns(c, "sessions"))
+    if "total_prompt_tokens" not in sessions_cols:
+        await conn.execute(text("ALTER TABLE sessions ADD COLUMN total_prompt_tokens INTEGER DEFAULT 0"))
+    if "total_completion_tokens" not in sessions_cols:
+        await conn.execute(text("ALTER TABLE sessions ADD COLUMN total_completion_tokens INTEGER DEFAULT 0"))
+
+
 async def init_db() -> None:
-    """初始化数据库：创建所有表"""
+    """初始化数据库：创建所有表，并执行轻量级迁移以兼容旧库"""
     # 导入模型以注册到 Base.metadata
     from database import models  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 为已存在的表补充新增列（兼容旧数据库）
+        await _run_lightweight_migrations(conn)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

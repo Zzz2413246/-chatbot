@@ -51,9 +51,11 @@ class SessionService:
         model = model_name or settings.model_name
         preset = preset_id or DEFAULT_PRESET_ID
 
-        # 校验预设存在
-        if get_preset(preset) is None:
-            preset = DEFAULT_PRESET_ID
+        # 校验内置预设；若是自定义预设（数字 ID），保留原值由 preset_service 解析
+        if preset != DEFAULT_PRESET_ID and get_preset(preset) is None:
+            # 非内置预设：可能是数据库中的自定义预设，保留原值
+            # （若为无效 ID，后续获取 system_prompt 时会回退到默认）
+            pass
 
         session = SessionModel(
             session_id=session_id,
@@ -64,6 +66,8 @@ class SessionService:
             created_at=datetime.utcnow(),
             last_active=datetime.utcnow(),
             message_count=0,
+            total_prompt_tokens=0,
+            total_completion_tokens=0,
         )
         db.add(session)
         await db.flush()
@@ -182,8 +186,10 @@ class SessionService:
         role: str,
         content: str,
         image_data: Optional[str] = None,
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
     ) -> Optional[dict]:
-        """向会话添加消息，并更新会话统计"""
+        """向会话添加消息，并更新会话统计（含 token 用量）"""
         session = await self.get_session_model(db, session_id)
         if not session:
             return None
@@ -194,10 +200,17 @@ class SessionService:
             content=content,
             image_data=image_data,
             timestamp=datetime.utcnow(),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         db.add(message)
         session.message_count = (session.message_count or 0) + 1
         session.last_active = datetime.utcnow()
+        # 累计 token 用量（仅 assistant 消息通常带 token，但此处统一累加非空值）
+        if prompt_tokens:
+            session.total_prompt_tokens = (session.total_prompt_tokens or 0) + int(prompt_tokens)
+        if completion_tokens:
+            session.total_completion_tokens = (session.total_completion_tokens or 0) + int(completion_tokens)
         await db.flush()
         return message.to_dict()
 
@@ -227,7 +240,7 @@ class SessionService:
 
     # ---------- 会话统计 ----------
     async def get_stats(self, db: AsyncSession, user_id: Optional[int] = None) -> dict:
-        """获取会话统计信息"""
+        """获取会话统计信息（含 token 用量）"""
         base_filter = []
         if user_id is not None:
             base_filter.append(SessionModel.user_id == user_id)
@@ -246,12 +259,25 @@ class SessionService:
             msg_total_stmt = msg_total_stmt.where(*base_filter)
         total_messages = (await db.execute(msg_total_stmt)).scalar() or 0
 
-        # 各模型使用情况
+        # 总 token 用量（从 session 表累计）
+        token_stmt = select(
+            func.coalesce(func.sum(SessionModel.total_prompt_tokens), 0).label("total_prompt_tokens"),
+            func.coalesce(func.sum(SessionModel.total_completion_tokens), 0).label("total_completion_tokens"),
+        )
+        if base_filter:
+            token_stmt = token_stmt.where(*base_filter)
+        token_row = (await db.execute(token_stmt)).one()
+        total_prompt_tokens = int(token_row.total_prompt_tokens or 0)
+        total_completion_tokens = int(token_row.total_completion_tokens or 0)
+
+        # 各模型使用情况（含 token 统计）
         model_stmt = (
             select(
                 SessionModel.model_name,
                 func.count(SessionModel.id).label("session_count"),
                 func.coalesce(func.sum(SessionModel.message_count), 0).label("message_count"),
+                func.coalesce(func.sum(SessionModel.total_prompt_tokens), 0).label("prompt_tokens"),
+                func.coalesce(func.sum(SessionModel.total_completion_tokens), 0).label("completion_tokens"),
             )
             .group_by(SessionModel.model_name)
         )
@@ -263,6 +289,8 @@ class SessionService:
                 "model_name": row.model_name,
                 "session_count": row.session_count,
                 "message_count": row.message_count,
+                "prompt_tokens": int(row.prompt_tokens or 0),
+                "completion_tokens": int(row.completion_tokens or 0),
             }
             for row in model_result
         ]
@@ -270,5 +298,7 @@ class SessionService:
         return {
             "total_sessions": total_sessions,
             "total_messages": total_messages,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
             "model_usage": model_usage,
         }

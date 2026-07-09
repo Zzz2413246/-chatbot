@@ -3,14 +3,22 @@
 - User: 用户
 - Session: 会话
 - Message: 消息
+- Preset: 自定义预设角色
 """
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, Index
+from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, Index, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db import Base
+
+
+def _utc_iso(dt) -> Optional[str]:
+    """将 UTC datetime 转为带 Z 后缀的 ISO 字符串，前端 new Date() 可正确转为本地时间"""
+    if not dt:
+        return None
+    return dt.isoformat() + "Z"
 
 
 class User(Base):
@@ -18,8 +26,8 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    openid: Mapped[str] = mapped_column(String(128), unique=True, index=True, comment="微信openid")
-    nickname: Mapped[str] = mapped_column(String(128), default="微信用户", comment="用户昵称")
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True, comment="用户昵称ID，唯一")
+    nickname: Mapped[str] = mapped_column(String(128), default="", comment="显示昵称")
     avatar_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, comment="头像URL")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="创建时间")
     last_login: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="最后登录时间")
@@ -31,11 +39,11 @@ class User(Base):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "openid": self.openid,
-            "nickname": self.nickname,
+            "username": self.username,
+            "nickname": self.nickname or self.username,
             "avatar_url": self.avatar_url,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "last_login": self.last_login.isoformat() if self.last_login else None,
+            "created_at": _utc_iso(self.created_at),
+            "last_login": _utc_iso(self.last_login),
         }
 
 
@@ -54,6 +62,9 @@ class Session(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="创建时间")
     last_active: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="最后活跃时间")
     message_count: Mapped[int] = mapped_column(Integer, default=0, comment="消息数量")
+    # token 用量累计（兼容旧数据，旧数据默认 0）
+    total_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, comment="会话累计 prompt token 用量")
+    total_completion_tokens: Mapped[int] = mapped_column(Integer, default=0, comment="会话累计 completion token 用量")
 
     user: Mapped[Optional["User"]] = relationship("User", back_populates="sessions")
     messages: Mapped[list["Message"]] = relationship(
@@ -73,9 +84,11 @@ class Session(Base):
             "title": self.title,
             "model_name": self.model_name,
             "preset_id": self.preset_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "last_active": self.last_active.isoformat() if self.last_active else None,
+            "created_at": _utc_iso(self.created_at),
+            "last_active": _utc_iso(self.last_active),
             "message_count": self.message_count,
+            "total_prompt_tokens": self.total_prompt_tokens or 0,
+            "total_completion_tokens": self.total_completion_tokens or 0,
         }
 
 
@@ -91,6 +104,9 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, comment="消息内容")
     image_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="图片base64数据")
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="时间戳")
+    # token 用量（仅 assistant 消息记录；兼容旧数据，nullable）
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="输入 prompt token 数")
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="输出 completion token 数")
 
     session: Mapped["Session"] = relationship("Session", back_populates="messages")
 
@@ -101,5 +117,39 @@ class Message(Base):
             "role": self.role,
             "content": self.content,
             "image_data": self.image_data,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": _utc_iso(self.timestamp),
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+
+
+class Preset(Base):
+    """自定义预设角色表（系统内置预设从 prompts/presets.py 读取，不入库）"""
+    __tablename__ = "presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # user_id 为 NULL 表示系统内置（保留字段，当前自定义预设必填）
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=True, index=True, comment="所属用户ID，NULL=系统内置"
+    )
+    name: Mapped[str] = mapped_column(String(64), comment="预设名称")
+    description: Mapped[str] = mapped_column(String(256), default="", comment="预设描述")
+    system_prompt: Mapped[str] = mapped_column(Text, comment="系统提示词")
+    icon: Mapped[str] = mapped_column(String(16), default="🤖", comment="图标 emoji")
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否系统内置")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+
+    def to_dict(self) -> dict:
+        """转换为 dict；id 用字符串形式以便与内置预设 ID 统一"""
+        return {
+            "id": str(self.id),
+            "user_id": self.user_id,
+            "name": self.name,
+            "description": self.description or "",
+            "system_prompt": self.system_prompt,
+            "icon": self.icon or "🤖",
+            "is_builtin": self.is_builtin,
+            "created_at": _utc_iso(self.created_at),
+            "updated_at": _utc_iso(self.updated_at),
         }

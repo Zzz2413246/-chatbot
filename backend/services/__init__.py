@@ -3,5 +3,6 @@ from services.llm_service import LLMService
 from services.session_service import SessionService
 from services.auth_service import AuthService
 from services.export_service import ExportService
+from services.preset_service import PresetService
 
-__all__ = ["LLMService", "SessionService", "AuthService", "ExportService"]
+__all__ = ["LLMService", "SessionService", "AuthService", "ExportService", "PresetService"]
