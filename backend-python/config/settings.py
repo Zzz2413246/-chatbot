@@ -1,42 +1,71 @@
-"""应用配置管理模块。
+"""Application configuration management.
 
-使用 pydantic-settings 从环境变量和 .env 文件加载配置。
-支持多模型多 API 提供商：DeepSeek / OpenAI / 自定义兼容接口。
+Uses pydantic-settings with a custom YAML source for multi-environment support.
 """
 from functools import lru_cache
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+from .yaml_loader import load_yaml_config, resolve_env_file
+
+
+class _YamlConfigSource(PydanticBaseSettingsSource):
+    """Loads config values from deep-merged YAML files at lowest priority."""
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        self._data: Dict[str, Any] = load_yaml_config()
+
+    def get_field_value(
+        self, field: FieldInfo, field_name: str
+    ) -> tuple[Optional[Any], str, bool]:
+        if field_name in self._data:
+            return self._data[field_name], f"yaml:{field_name}", False
+        return None, "", False
+
+    def __call__(self) -> Dict[str, Any]:
+        return self._data
 
 
 class Settings(BaseSettings):
-    """应用全局配置。"""
+    """Application global configuration.
+
+    Source priority (lowest to highest):
+      1. Field defaults in this class
+      2. YAML files  (config.yaml + config.{env}.yaml)
+      3. .env file   (.env.{env} or .env fallback)
+      4. Environment variables
+      5. Constructor kwargs
+    """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=resolve_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        protected_namespaces=(),
     )
 
-    # ==================== 多 API 提供商 ====================
-    # DeepSeek（默认）
+    # ==================== Multi-API Provider Keys ====================
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    # OpenAI（或任何兼容接口）
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    # 通用（其他兼容接口共用）
     custom_api_key: str = ""
     custom_base_url: str = ""
 
-    # 兼容旧配置字段（仅作为 DeepSeek 的 fallback）
+    # Legacy fallback fields (only for deepseek)
     api_key: str = ""
     base_url: str = ""
 
-    # ==================== 模型定义 ====================
-    # 每个模型需指定所属 provider: "deepseek" | "openai" | "custom"
+    # ==================== Model Definitions ====================
     model_providers: Dict[str, str] = {
         "deepseek-chat": "deepseek",
         "deepseek-reasoner": "deepseek",
@@ -47,25 +76,42 @@ class Settings(BaseSettings):
         "qwen-plus": "custom",
     }
 
-    # 可用模型列表（从 model_providers 的 key 自动生成，或手动指定）
     available_models: List[str] = []
 
-    # LLM 默认参数
+    # LLM defaults
     model_name: str = "deepseek-chat"
     max_tokens: int = 2048
     temperature: float = 0.7
 
-    # ==================== 语音识别 (DashScope ASR) ====================
+    # ==================== ASR ====================
     asr_model: str = "qwen3-asr-flash"
     asr_language: str = "zh"
 
-    # ==================== 数据库 ====================
+    # ==================== Database ====================
     database_url: str = "sqlite+aiosqlite:///./chatbot.db"
 
-    # ==================== 日志 ====================
+    # ==================== Logging ====================
     log_level: str = "INFO"
 
-    # ==================== 兼容旧配置 ====================
+    # ==================== Custom source chain ====================
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: Type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> Tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+            _YamlConfigSource(settings_cls),
+        )
+
+    # ==================== Validators ====================
     @field_validator("temperature")
     @classmethod
     def validate_temperature(cls, v: float) -> float:
@@ -80,11 +126,12 @@ class Settings(BaseSettings):
             raise ValueError("max_tokens 必须大于 0")
         return v
 
+    # ==================== Provider resolution ====================
     def get_provider_config(self, model_name: str) -> dict:
         """根据模型名获取对应的 API 提供商配置（api_key + base_url）。
 
         注意：api_key / base_url 旧字段仅作为 DeepSeek 的 fallback，
-        不混用到 openai / custom 提供商，避免用错 Key。
+        不混用到 openai / custom 提供商。
         """
         provider = self.model_providers.get(model_name, "deepseek")
 
@@ -110,7 +157,6 @@ class Settings(BaseSettings):
             cfg = self.get_provider_config(model)
             if cfg["api_key"]:
                 models.append(model)
-        # 至少保留默认模型
         if not models:
             models = list(self.model_providers.keys())
         return models

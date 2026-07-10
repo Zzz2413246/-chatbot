@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 科普助手 · 科科 - Vue3 应用逻辑
  * 适配后端 API: http://localhost:8000
  */
@@ -115,7 +115,13 @@ const app = createApp({
             // 语音
             isListening: false,
             isSpeaking: false,
-            speechRecognition: null,
+            mediaRecorder: null,
+            audioChunks: [],
+            audioContext: null,
+            mediaStream: null,
+            scriptProcessor: null,
+            audioSamples: [],
+            recordTimeout: null,
             speakingMessageIndex: null,  // 当前正在朗读的消息索引
 
             // 工具调用 Agent
@@ -1310,109 +1316,62 @@ const app = createApp({
         }
 
         // ===== 语音输入/输出 =====
-        function initSpeechRecognition() {
-            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-            if (!SR) {
-                showToast('当前浏览器不支持语音识别', 'error');
-                return null;
+        // ===== 语音输入/输出 =====
+        async function stopRecordingAndRecognize() {
+            if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
+                state.mediaRecorder.stop();
             }
-            const recognition = new SR();
-            recognition.lang = 'zh-CN';
-            recognition.continuous = false;
-            recognition.interimResults = true;
-            let finalTranscript = '';
-            recognition.onresult = (event) => {
-                let interimText = '';
-                for (let i = event.resultIndex; i < event.results.length; i++) {
-                    const transcript = event.results[i][0].transcript;
-                    if (event.results[i].isFinal) {
-                        finalTranscript += transcript;
-                    } else {
-                        interimText += transcript;
-                    }
-                }
-                // 实时显示识别结果到输入框
-                state.inputMessage = finalTranscript + interimText;
-                adjustTextareaHeight();
-            };
-            recognition.onerror = (event) => {
-                console.error('语音识别错误:', event.error);
-                if (event.error === 'not-allowed') {
-                    showToast('请允许浏览器使用麦克风', 'error');
-                } else if (event.error !== 'aborted') {
-                    showToast('语音识别出错: ' + event.error, 'error');
-                }
-                state.isListening = false;
-            };
-            recognition.onend = () => {
-                state.isListening = false;
-            };
-            return recognition;
         }
 
-        function toggleVoiceInput() {
-            if (state.isListening) {
-                // 停止
-                if (state.speechRecognition) {
-                    state.speechRecognition.stop();
-                }
-                state.isListening = false;
-                return;
-            }
-            if (!state.speechRecognition) {
-                state.speechRecognition = initSpeechRecognition();
-                if (!state.speechRecognition) return;
-            }
+        async function toggleVoiceInput() {
+            if (state.isListening) { stopRecordingAndRecognize(); return; }
+            if (!navigator.mediaDevices?.getUserMedia) { showToast('当前浏览器不支持麦克风', 'error'); return; }
             try {
-                state.speechRecognition.start();
-                state.isListening = true;
-                showToast('🎤 正在聆听...', 'info');
-            } catch (error) {
-                console.error('启动语音识别失败:', error);
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                state.mediaStream = stream; state.audioChunks = []; state.isListening = true;
+                showToast('🎤 正在录音...（再次点击停止）', 'info');
+                let mimeType = 'audio/webm';
+                if (!MediaRecorder.isTypeSupported(mimeType)) { mimeType = 'audio/ogg'; if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = ''; }
+                const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+                state.mediaRecorder = recorder;
+                recorder.ondataavailable = e => { if (e.data.size > 0) state.audioChunks.push(e.data); };
+                recorder.onstop = async () => {
+                    stream.getTracks().forEach(t => t.stop()); state.mediaStream = null; state.isListening = false;
+                    if (state.recordTimeout) { clearTimeout(state.recordTimeout); state.recordTimeout = null; }
+                    if (state.audioChunks.length === 0) { showToast('未录制到音频', 'error'); return; }
+                    const blob = new Blob(state.audioChunks, { type: mimeType || 'audio/webm' });
+                    state.audioChunks = [];
+                    if (blob.size < 1000) { showToast('录音过短', 'error'); return; }
+                    try {
+                        showToast('🔍 正在识别...', 'info');
+                        const fd = new FormData(); fd.append('file', blob, 'recording.webm');
+                        const resp = await fetch(`${API_BASE_URL}/api/speech/recognize`, { method: 'POST', body: fd });
+                        if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.detail || `失败 (${resp.status})`); }
+                        const result = await resp.json();
+                        if (result.text) { state.inputMessage = (state.inputMessage ? state.inputMessage + ' ' : '') + result.text; adjustTextareaHeight(); showToast('✅ 语音识别完成', 'success'); }
+                        else { showToast('未识别到内容，请重试', 'error'); }
+                    } catch (err) { console.error('ASR error:', err); showToast('识别失败: ' + (err.message || '未知错误'), 'error'); }
+                };
+                recorder.onerror = () => { stream.getTracks().forEach(t => t.stop()); state.mediaStream = null; state.isListening = false; showToast('录音出错', 'error'); };
+                recorder.start();
+                state.recordTimeout = setTimeout(() => { if (state.isListening) { showToast('已到15秒上限', 'info'); stopRecordingAndRecognize(); } }, 15000);
+            } catch (err) {
                 state.isListening = false;
-                showToast('启动语音识别失败', 'error');
+                const map = { NotAllowedError: '请允许麦克风权限', PermissionDeniedError: '请允许麦克风权限', NotFoundError: '未检测到麦克风' };
+                showToast(map[err.name] || '无法访问麦克风', 'error');
             }
         }
 
-        // 朗读/停止朗读助手回答
         function toggleSpeech(content, msgIndex) {
-            if (!('speechSynthesis' in window)) {
-                showToast('当前浏览器不支持语音合成', 'error');
-                return;
-            }
-            // 如果正在朗读同一条消息，停止
-            if (state.isSpeaking && state.speakingMessageIndex === msgIndex) {
-                window.speechSynthesis.cancel();
-                state.isSpeaking = false;
-                state.speakingMessageIndex = null;
-                return;
-            }
-            // 停止之前的朗读
-            if (state.isSpeaking) {
-                window.speechSynthesis.cancel();
-            }
-            // 简单清理 markdown 标记
-            const plainText = content
-                .replace(/```[\s\S]*?```/g, '（代码块）')
-                .replace(/[#*`_~\[\]>]/g, '')
-                .replace(/\n+/g, '。')
-                .trim();
-            const utterance = new SpeechSynthesisUtterance(plainText);
-            utterance.lang = 'zh-CN';
-            utterance.rate = 1.0;
-            utterance.onend = () => {
-                state.isSpeaking = false;
-                state.speakingMessageIndex = null;
-            };
-            utterance.onerror = () => {
-                state.isSpeaking = false;
-                state.speakingMessageIndex = null;
-            };
-            window.speechSynthesis.speak(utterance);
-            state.isSpeaking = true;
-            state.speakingMessageIndex = msgIndex;
+            if (!('speechSynthesis' in window)) { showToast('浏览器不支持语音合成', 'error'); return; }
+            if (state.isSpeaking && state.speakingMessageIndex === msgIndex) { window.speechSynthesis.cancel(); state.isSpeaking = false; state.speakingMessageIndex = null; return; }
+            if (state.isSpeaking) window.speechSynthesis.cancel();
+            const text = content.replace(/```[\s\S]*?```/g, '（代码块）').replace(/[#*`_~\[\]>]/g, '').replace(/\n+/g, '。').trim();
+            const u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.0;
+            u.onend = () => { state.isSpeaking = false; state.speakingMessageIndex = null; };
+            u.onerror = () => { state.isSpeaking = false; state.speakingMessageIndex = null; };
+            window.speechSynthesis.speak(u); state.isSpeaking = true; state.speakingMessageIndex = msgIndex;
         }
-
         // ===== 工具调用 Agent =====
         function toggleAgentMode() {
             state.agentMode = !state.agentMode;

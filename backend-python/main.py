@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database.db import init_db
 from logger import get_logger, setup_logging
-from routers import auth, chat, models, presets, session
+from routers import auth, chat, models, presets, session, speech
 
 setup_logging()
 logger = get_logger(__name__)
@@ -45,6 +45,7 @@ app.include_router(session.router)
 app.include_router(auth.router)
 app.include_router(models.router)
 app.include_router(presets.router)
+app.include_router(speech.router)
 
 
 @app.get("/api/")
