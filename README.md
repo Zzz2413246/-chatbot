@@ -29,7 +29,7 @@
 ```bash
 # 1. 启动后端
 cd backend
-pip install -r ../backend-python/requirements.txt
+pip install -r requirements.txt
 python -m src.main
 
 # 2. 启动前端（另一个终端）

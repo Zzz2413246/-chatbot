@@ -1,7 +1,8 @@
-# 环境变量（含 API Key）
-.env
-backend/.env
-backend-python/.env
+# 环境变量（含 API Key）—— 所有 .env* 文件均忽略
+.env*
+!.env.example
+**/.env*
+!**/.env.example
 
 # Python
 __pycache__/

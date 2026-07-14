@@ -15,6 +15,16 @@ _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
+# ====== 修复 langchain 命名空间包缺少属性的问题 ======
+# 项目仅使用 langchain-core + langchain-openai，未安装完整 langchain 包。
+# langchain-core 的 globals.py 内部会访问 langchain.verbose/debug/llm_cache，
+# 但 langchain 此时只是一个无属性的命名空间包，会导致 AttributeError。
+# 在此提前注入这些属性。
+import langchain
+langchain.verbose = False
+langchain.debug = False
+langchain.llm_cache = None
+
 import asyncio
 import json
 import time
@@ -22,7 +32,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -37,6 +47,7 @@ from services.auth_service import AuthService
 from services.export_service import ExportService
 from services.preset_service import PresetService
 from services.tool_service import get_default_tools
+from services.speech_service import speech_service
 from prompts.presets import get_preset, get_preset_list, DEFAULT_PRESET_ID
 from utils.logger import logger, setup_logging
 
@@ -96,6 +107,7 @@ app.add_middleware(
 
 # ========== 请求模型 ==========
 class ChatRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
     session_id: Optional[str] = None
     message: str
     model_name: Optional[str] = None
@@ -104,6 +116,7 @@ class ChatRequest(BaseModel):
 
 
 class ImageChatRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
     session_id: Optional[str] = None
     message: str
     image_data: str
@@ -112,6 +125,7 @@ class ImageChatRequest(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
     model_name: Optional[str] = None
     preset_id: Optional[str] = None
     title: Optional[str] = None
@@ -123,6 +137,7 @@ class RenameTitleRequest(BaseModel):
 
 
 class SwitchModelRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
     session_id: str
     model_name: str
 
@@ -160,6 +175,7 @@ class UpdatePresetRequest(BaseModel):
 
 class CompareChatRequest(BaseModel):
     """多模型对比对话请求"""
+    model_config = {"protected_namespaces": ()}
     message: str
     model_names: List[str]
     preset_id: Optional[str] = None
@@ -167,6 +183,7 @@ class CompareChatRequest(BaseModel):
 
 class AgentChatRequest(BaseModel):
     """工具调用 Agent 对话请求"""
+    model_config = {"protected_namespaces": ()}
     message: str
     session_id: Optional[str] = None
     model_name: Optional[str] = None
@@ -931,6 +948,37 @@ async def export_session(session_id: str, format: str = "markdown", db=Depends(g
             ),
         },
     )
+
+
+# ========== 语音识别 ==========
+
+@app.post("/api/speech/recognize")
+async def speech_recognize(file: UploadFile = File(...)):
+    """
+    语音识别接口
+    - 接收音频文件（支持 WAV / WebM / OGG / MP3 / MP4 等格式）
+    - 自动通过 ffmpeg 转为 16kHz mono WAV
+    - 调用 DashScope qwen3-asr-flash 进行语音识别
+    """
+    if not speech_service.is_available:
+        raise HTTPException(status_code=503, detail="语音识别服务未配置，请在 .env 中设置 CUSTOM_API_KEY 和 CUSTOM_BASE_URL")
+
+    audio_bytes = await file.read()
+    mime = file.content_type or "audio/webm"
+
+    max_size = 10 * 1024 * 1024  # 10 MB
+    if len(audio_bytes) > max_size:
+        raise HTTPException(status_code=413, detail="音频文件不能超过 10MB")
+    if len(audio_bytes) < 1000:
+        raise HTTPException(status_code=400, detail="音频过短")
+
+    logger.info(f"语音识别请求 | filename={file.filename} | size={len(audio_bytes)} | mime={mime}")
+    try:
+        text = await speech_service.recognize_any(audio_bytes, mime)
+        return {"text": text}
+    except Exception as e:
+        logger.error(f"语音识别失败: {e}")
+        raise HTTPException(status_code=500, detail=f"语音识别失败: {e}")
 
 
 # ========== 启动 ==========

@@ -1,0 +1,4 @@
+# 测试环境覆盖配置
+debug: false
+database_url: "sqlite+aiosqlite:///./data/chatbot_test.db"
+log_level: DEBUG

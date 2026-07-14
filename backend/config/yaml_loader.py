@@ -1,4 +1,10 @@
-"""YAML config loader with environment-specific overrides."""
+"""YAML 配置加载器，支持环境特定覆盖。
+
+用法：
+  1. 设置 APP_ENV 环境变量（默认为 dev）
+  2. 加载 config.yaml（基础配置）
+  3. 加载 config.{APP_ENV}.yaml（环境覆盖），深度合并
+"""
 import os
 from pathlib import Path
 from typing import Any, Dict
@@ -7,7 +13,7 @@ import yaml
 
 
 def _find_project_root() -> Path:
-    """Locate the backend-python directory (parent of config/)."""
+    """定位 backend/ 目录"""
     return Path(__file__).resolve().parent.parent
 
 
@@ -15,16 +21,12 @@ _PROJECT_ROOT = _find_project_root()
 
 
 def get_app_env() -> str:
-    """Return APP_ENV from environment, defaulting to 'dev'."""
+    """返回 APP_ENV 环境变量，默认 dev"""
     return os.getenv("APP_ENV", "dev").strip().lower()
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge override into base. Returns a new dict.
-
-    Scalars and lists in override replace those in base.
-    Nested dicts are merged recursively.
-    """
+    """递归合并 override 到 base。标量和列表会覆盖，嵌套 dict 会递归合并。"""
     result = base.copy()
     for key, value in override.items():
         if (
@@ -39,9 +41,9 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
 
 
 def load_yaml_config() -> Dict[str, Any]:
-    """Load config.yaml and merge with config.{env}.yaml.
+    """加载 config.yaml 并与 config.{env}.yaml 深度合并。
 
-    Returns the deep-merged dict. Missing files are silently skipped.
+    返回深度合并后的 dict。缺失的文件会被静默跳过。
     """
     env = get_app_env()
     base_path = _PROJECT_ROOT / "config.yaml"
@@ -62,11 +64,11 @@ def load_yaml_config() -> Dict[str, Any]:
 
 
 def resolve_env_file() -> str:
-    """Return the appropriate .env file path based on APP_ENV.
+    """根据 APP_ENV 返回对应的 .env 文件路径。
 
-    Priority:
-    1. .env.{APP_ENV}  (e.g. .env.dev)
-    2. .env            (backward compat fallback)
+    优先级：
+    1. .env.{APP_ENV}  (例如 .env.dev)
+    2. .env             (向后兼容的后备方案)
     """
     env = get_app_env()
     env_specific = _PROJECT_ROOT / f".env.{env}"

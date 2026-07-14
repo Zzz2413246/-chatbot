@@ -1,0 +1,27 @@
+# 科普助手 · 科科 — 全局非敏感配置
+# 环境特定覆盖见 config.{env}.yaml
+# 敏感信息（API Key 等）请放入 .env 或 .env.{env}
+
+# LLM 默认参数
+max_context_length: 8192
+max_tokens: 2048
+temperature: 0.7
+request_timeout: 120
+
+# 默认模型
+model_name: deepseek-chat
+
+# 服务
+host: "0.0.0.0"
+port: 8000
+debug: true
+
+# 数据库（默认开发用 SQLite）
+database_url: "sqlite+aiosqlite:///./data/chatbot.db"
+
+# 认证
+token_expire_hours: 72
+
+# 语音识别
+asr_model: qwen3-asr-flash
+asr_language: zh

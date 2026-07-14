@@ -1,0 +1,6 @@
+# 生产环境覆盖配置
+debug: false
+database_url: "sqlite+aiosqlite:///./data/chatbot_prod.db"
+max_tokens: 4096
+request_timeout: 180
+log_level: WARNING

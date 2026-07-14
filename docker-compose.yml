@@ -1,4 +1,4 @@
-chat-botversion: '3.8'
+version: '3.8'
 
 services:
   backend:
@@ -6,12 +6,17 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - APP_ENV=prod
       - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL_NAME=${MODEL_NAME}
       - MAX_TOKENS=${MAX_TOKENS}
       - TEMPERATURE=${TEMPERATURE}
-      - DATABASE_URL=sqlite+aiosqlite:///./chatbot.db
+      - DEEPSEEK_API_KEY=${API_KEY}
+      - CUSTOM_API_KEY=${CUSTOM_API_KEY:-}
+      - CUSTOM_BASE_URL=${CUSTOM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/chatbot.db
+      - ASR_MODEL=${ASR_MODEL:-qwen3-asr-flash}
       - WECHAT_APP_ID=${WECHAT_APP_ID:-}
       - WECHAT_APP_SECRET=${WECHAT_APP_SECRET:-}
       - WECHAT_REDIRECT_URI=${WECHAT_REDIRECT_URI:-http://localhost:8000/wechat/callback.html}

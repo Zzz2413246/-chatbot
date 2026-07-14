@@ -1,0 +1,3 @@
+# 开发环境覆盖配置
+debug: true
+database_url: "sqlite+aiosqlite:///./data/chatbot.db"
